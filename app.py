@@ -9,6 +9,10 @@ import PIL.Image
 import PIL.ImageTk
 from threading import Thread
 import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from attendance_analytics import AttendanceAnalytics
+from tkcalendar import DateEntry
 
 # SQLAlchemy and MySQL dependencies
 from sqlalchemy import create_engine, Column, String, DateTime, LargeBinary, Float, ForeignKey
@@ -62,8 +66,10 @@ class AttendanceSystem:
         self.cap = None
         self.preview_active = False
         self.current_frame = None
-        
+
         self.create_gui()
+        self.create_analytics_tab()
+        self.create_attendance_list_tab()
         
     def create_gui(self):
         # Create notebook for tabs
@@ -328,6 +334,188 @@ class AttendanceSystem:
         
         finally:
             session.close()
+
+    def create_analytics_tab(self):
+        # Create Analytics Tab
+        self.analytics_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.analytics_frame, text='Analytics')
+        
+        # Initialize Analytics
+        self.analytics = AttendanceAnalytics(engine)
+        
+        # Summary Statistics Frame
+        summary_frame = ttk.LabelFrame(self.analytics_frame, text="Attendance Summary")
+        summary_frame.pack(padx=10, pady=10, fill='x')
+        
+        # Get summary data
+        summary = self.analytics.get_total_attendance_summary()
+        
+        # Display summary metrics
+        metrics = [
+            f"Total Students: {summary['total_students']}",
+            f"Total Attendance Records: {summary['total_attendance_records']}",
+            f"Unique Students Attended: {summary['unique_students_attended']}",
+            f"Average Daily Attendance: {summary['average_daily_attendance']}",
+            f"Attendance Percentage: {summary['attendance_percentage']}%"
+        ]
+        
+        for i, metric in enumerate(metrics):
+            ttk.Label(summary_frame, text=metric).grid(row=i//2, column=i%2, padx=5, pady=2, sticky='w')
+        
+        # Attendance Trend Plot
+        trend_frame = ttk.LabelFrame(self.analytics_frame, text="Attendance Trend")
+        trend_frame.pack(padx=10, pady=10, fill='both', expand=True)
+        
+        trend_df = self.analytics.generate_attendance_trend()
+        trend_fig = self.analytics.plot_attendance_trend(trend_df)
+        
+        canvas = FigureCanvasTkAgg(trend_fig, master=trend_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill='both', expand=True)
+        
+        # Student Attendance Report
+        report_frame = ttk.LabelFrame(self.analytics_frame, text="Student Attendance Report")
+        report_frame.pack(padx=10, pady=10, fill='both', expand=True)
+        
+        # Treeview for student attendance report
+        columns = ('Roll No', 'Name', 'Attendance Count', 'Attendance Percentage')
+        student_report_tree = ttk.Treeview(report_frame, columns=columns, show='headings')
+        
+        for col in columns:
+            student_report_tree.heading(col, text=col)
+            student_report_tree.column(col, width=100)
+        
+        student_report_tree.pack(fill='both', expand=True)
+        
+        # Populate treeview
+        student_df = self.analytics.generate_student_attendance_report()
+        for index, row in student_df.iterrows():
+            student_report_tree.insert('', 'end', values=list(row))
+        
+        # Export Button for Student Report
+        export_button = ttk.Button(
+            report_frame, 
+            text="Export Student Report", 
+            command=lambda: self.export_student_report(student_df)
+        )
+        export_button.pack(pady=5)
+
+    # Add this method to the AttendanceSystem class
+    def export_student_report(self, df):
+        filename = filedialog.asksaveasfilename(
+            defaultextension='.xlsx',
+            filetypes=[("Excel files", "*.xlsx")]
+        )
+        if filename:
+            df.to_excel(filename, index=False)
+            messagebox.showinfo("Success", "Student attendance report exported successfully!")
+    
+    def create_attendance_list_tab(self):
+        """
+        Create a tab to display detailed attendance records
+        """
+        # Attendance List Tab
+        self.attendance_list_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.attendance_list_frame, text='Attendance List')
+        
+        # Treeview for attendance records
+        columns = ('Roll No', 'Name', 'Date', 'Time')
+        self.attendance_tree = ttk.Treeview(self.attendance_list_frame, columns=columns, show='headings')
+        
+        # Configure column headings
+        for col in columns:
+            self.attendance_tree.heading(col, text=col)
+            self.attendance_tree.column(col, width=150, anchor='center')
+        
+        # Pack the treeview
+        self.attendance_tree.pack(fill='both', expand=True)
+        
+        # Scrollbar for treeview
+        scrollbar = ttk.Scrollbar(self.attendance_list_frame, orient=tk.VERTICAL, command=self.attendance_tree.yview)
+        scrollbar.pack(side='right', fill='y')
+        self.attendance_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Date filter frame
+        filter_frame = ttk.Frame(self.attendance_list_frame)
+        filter_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Date range selection
+        ttk.Label(filter_frame, text="From:").pack(side='left', padx=(0,5))
+        self.from_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        self.from_date.pack(side='left', padx=5)
+        
+        ttk.Label(filter_frame, text="To:").pack(side='left', padx=(10,5))
+        self.to_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        self.to_date.pack(side='left', padx=5)
+        
+        # Filter and Refresh buttons
+        ttk.Button(filter_frame, text="Filter", command=self.filter_attendance).pack(side='left', padx=10)
+        ttk.Button(filter_frame, text="Refresh", command=self.load_attendance_list).pack(side='left')
+        
+        # Initially load attendance list
+        self.load_attendance_list()
+
+    def load_attendance_list(self, start_date=None, end_date=None):
+        """
+        Load attendance records into the treeview
+        
+        Args:
+            start_date (datetime, optional): Start date for filtering
+            end_date (datetime, optional): End date for filtering
+        """
+        # Clear existing items
+        for item in self.attendance_tree.get_children():
+            self.attendance_tree.delete(item)
+        
+        # Create a new session
+        session = SessionLocal()
+        
+        try:
+            # Base query to get attendance with student details
+            query = (
+                session.query(Attendance, Student)
+                .join(Student, Attendance.roll_no == Student.roll_no)
+            )
+            
+            # Apply date filtering if dates are provided
+            if start_date and end_date:
+                query = query.filter(
+                    Attendance.date.between(start_date, end_date)
+                )
+            
+            # Execute query and populate treeview
+            for attendance, student in query.order_by(Attendance.date.desc()).all():
+                self.attendance_tree.insert('', 'end', values=(
+                    student.roll_no, 
+                    student.name, 
+                    attendance.date.strftime('%Y-%m-%d'), 
+                    attendance.time.strftime('%H:%M:%S')
+                ))
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load attendance list: {str(e)}")
+        
+        finally:
+            session.close()
+
+    def filter_attendance(self):
+        """
+        Filter attendance records based on date range
+        """
+        try:
+            start_date = self.from_date.get_date()
+            end_date = self.to_date.get_date()
+            
+            # Ensure end date is not before start date
+            if end_date < start_date:
+                messagebox.showerror("Error", "End date must be after start date")
+                return
+            
+            # Load filtered attendance list
+            self.load_attendance_list(start_date, end_date)
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Error filtering attendance: {str(e)}")
 
     def clear_registration_form(self):
         self.name_entry.delete(0, tk.END)
