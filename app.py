@@ -7,12 +7,14 @@ import numpy as np
 from datetime import datetime
 import PIL.Image
 import PIL.ImageTk
+from PIL import Image
 from threading import Thread
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from attendance_analytics import AttendanceAnalytics
 from tkcalendar import DateEntry
+import io
 
 # SQLAlchemy and MySQL dependencies
 from sqlalchemy import create_engine, Column, String, DateTime, LargeBinary, Float, ForeignKey
@@ -67,6 +69,9 @@ class AttendanceSystem:
         self.preview_active = False
         self.current_frame = None
 
+        # Store paths of uploaded photos
+        self.photo_paths = []
+
         self.create_gui()
         self.create_analytics_tab()
         self.create_attendance_list_tab()
@@ -103,13 +108,23 @@ class AttendanceSystem:
         self.att_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.att_frame, text='Attendance')
         
-        # Attendance controls
-        tk.Button(self.att_frame, text="Take Attendance", command=self.take_attendance).grid(row=0, column=0, pady=10)
-        tk.Button(self.att_frame, text="Export Report", command=self.export_attendance_report).grid(row=0, column=1, pady=10)
+        # Create buttons frame
+        buttons_frame = ttk.Frame(self.att_frame)
+        buttons_frame.grid(row=0, column=0, columnspan=2, pady=10)
         
-        # Attendance preview
+        tk.Button(buttons_frame, text="Take Live Attendance", command=self.take_attendance).pack(side=tk.LEFT, padx=5)
+        tk.Button(buttons_frame, text="Upload Photos", command=self.upload_photos).pack(side=tk.LEFT, padx=5)
+        tk.Button(buttons_frame, text="Process Uploaded Photos", command=self.process_uploaded_photos).pack(side=tk.LEFT, padx=5)
+        tk.Button(buttons_frame, text="Clear Uploads", command=self.clear_uploads).pack(side=tk.LEFT, padx=5)
+        tk.Button(buttons_frame, text="Export Report", command=self.export_attendance_report).pack(side=tk.LEFT, padx=5)
+        
+        # Create upload info label
+        self.upload_info_label = tk.Label(self.att_frame, text="No photos uploaded")
+        self.upload_info_label.grid(row=1, column=0, columnspan=2, pady=5)
+        
+        # Attendance preview label (existing)
         self.att_preview_label = tk.Label(self.att_frame)
-        self.att_preview_label.grid(row=1, column=0, columnspan=2, padx=5, pady=5)
+        self.att_preview_label.grid(row=2, column=0, columnspan=2, padx=5, pady=5)
         
         # Student list tab
         self.list_frame = ttk.Frame(self.notebook)
@@ -520,6 +535,109 @@ class AttendanceSystem:
     def clear_registration_form(self):
         self.name_entry.delete(0, tk.END)
         self.roll_no_entry.delete(0, tk.END)
+    
+    def upload_photos(self):
+        """Allow users to select multiple photos for attendance"""
+        filetypes = (
+            ('Image files', '*.jpg *.jpeg *.png'),
+            ('All files', '*.*')
+        )
+        
+        filenames = filedialog.askopenfilenames(
+            title='Select photos for attendance',
+            filetypes=filetypes
+        )
+        
+        if filenames:
+            self.photo_paths.extend(filenames)
+            self.update_upload_info()
+
+    def clear_uploads(self):
+        """Clear all uploaded photos"""
+        self.photo_paths.clear()
+        self.update_upload_info()
+        self.att_preview_label.config(image='')
+
+    def update_upload_info(self):
+        """Update the upload information label"""
+        if not self.photo_paths:
+            self.upload_info_label.config(text="No photos uploaded")
+        else:
+            self.upload_info_label.config(text=f"{len(self.photo_paths)} photos uploaded")
+
+    def process_uploaded_photos(self):
+        """Process uploaded photos for attendance"""
+        if not self.photo_paths:
+            messagebox.showinfo("Info", "Please upload photos first!")
+            return
+        
+        self.att_preview_label.config(text="Processing photos...")
+        self.root.update()
+        
+        # Create a new thread for processing
+        process_thread = Thread(target=self.process_photos_thread)
+        process_thread.start()
+
+    def process_photos_thread(self):
+        """Thread function to process photos"""
+        marked_students = set()
+        session = SessionLocal()
+        
+        try:
+            # Get all student data
+            known_students = session.query(Student).all()
+            known_encodings = [np.frombuffer(student.face_encoding, dtype=np.float64) for student in known_students]
+            
+            for photo_path in self.photo_paths:
+                try:
+                    # Load and convert image to numpy array
+                    image = Image.open(photo_path)
+                    image_array = np.array(image)
+                    
+                    # Update preview on main thread
+                    self.root.after(0, self.update_photo_preview, image)
+                    
+                    # Detect faces and get encodings
+                    face_locations = face_recognition.face_locations(image_array)
+                    face_encodings = face_recognition.face_encodings(image_array, face_locations)
+                    
+                    for face_encoding in face_encodings:
+                        matches = face_recognition.compare_faces(known_encodings, face_encoding)
+                        if True in matches:
+                            index = matches.index(True)
+                            student = known_students[index]
+                            
+                            if student.roll_no not in marked_students:
+                                marked_students.add(student.roll_no)
+                                self.mark_attendance(session, student.roll_no)
+                
+                except Exception as e:
+                    print(f"Error processing photo {photo_path}: {str(e)}")
+            
+            # Show completion message on main thread
+            self.root.after(0, self.show_photo_processing_complete, len(marked_students))
+        
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+        
+        finally:
+            session.close()
+
+    def update_photo_preview(self, image):
+        """Update preview with current photo being processed"""
+        # Resize image for preview
+        preview_size = (320, 240)
+        image.thumbnail(preview_size, Image.Resampling.LANCZOS)
+        photo = PIL.ImageTk.PhotoImage(image)
+        self.att_preview_label.config(image=photo)
+        self.att_preview_label.image = photo
+
+    def show_photo_processing_complete(self, num_marked):
+        """Show completion message after processing photos"""
+        messagebox.showinfo("Success", f"Photo processing completed!\nMarked attendance for {num_marked} students.")
+        self.att_preview_label.config(image='', text="Photo Processing Complete")
+        self.photo_paths.clear()
+        self.update_upload_info()
 
     def run(self):
         self.root.mainloop()
