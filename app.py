@@ -38,6 +38,8 @@ class Student(Base):
     
     roll_no = Column(String(50), primary_key=True)
     name = Column(String(100), nullable=False)
+    batch = Column(String(50), nullable=False)  # e.g., "2023-25"
+    course = Column(String(100), nullable=False)  # e.g., "MCA, B.Tech CSE"
     face_encoding = Column(LargeBinary, nullable=False)
     registration_date = Column(DateTime, server_default=func.now())
     
@@ -88,22 +90,53 @@ class AttendanceSystem:
         # Registration form
         tk.Label(self.reg_frame, text="Student Registration", font=('Helvetica', 16, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
         
-        tk.Label(self.reg_frame, text="Name:").grid(row=1, column=0, padx=5, pady=5)
-        self.name_entry = tk.Entry(self.reg_frame)
-        self.name_entry.grid(row=1, column=1, padx=5, pady=5)
+        # Create form fields
+        form_fields = [
+            ("Name:", "name_entry"),
+            ("Roll No:", "roll_no_entry"),
+            ("Batch:", "batch_entry"),
+            ("Course:", "course_entry")
+        ]
         
-        tk.Label(self.reg_frame, text="Roll No:").grid(row=2, column=0, padx=5, pady=5)
-        self.roll_no_entry = tk.Entry(self.reg_frame)
-        self.roll_no_entry.grid(row=2, column=1, padx=5, pady=5)
+        for i, (label, attr) in enumerate(form_fields, start=1):
+            tk.Label(self.reg_frame, text=label).grid(row=i, column=0, padx=5, pady=5, sticky='e')
+            setattr(self, attr, tk.Entry(self.reg_frame))
+            getattr(self, attr).grid(row=i, column=1, padx=5, pady=5, sticky='ew')
+        
+        # Add course dropdown menu with common courses
+        self.course_var = tk.StringVar()
+        common_courses = [
+            "B.Tech CSE",
+            "B.Tech IT",
+            "B.Tech ECE",
+            "B.Tech EEE",
+            "B.Tech MECH",
+            "B.Tech CIVIL",
+            "M.Tech CSE",
+            "MCA",
+            "BCA"
+        ]
+        self.course_entry = ttk.Combobox(self.reg_frame, textvariable=self.course_var, values=common_courses)
+        self.course_entry.grid(row=4, column=1, padx=5, pady=5, sticky='ew')
+        
+        # Add batch generation helper
+        current_year = datetime.now().year
+        batch_years = [f"{year}-{year+4}" for year in range(current_year-4, current_year+1)]
+        self.batch_entry = ttk.Combobox(self.reg_frame, values=batch_years)
+        self.batch_entry.set(f"{current_year}-{current_year+4}")  # Set default to current year
         
         # Preview frame
         self.preview_label = tk.Label(self.reg_frame)
-        self.preview_label.grid(row=3, column=0, columnspan=2, padx=5, pady=5)
+        self.preview_label.grid(row=5, column=0, columnspan=2, padx=5, pady=5)
         
         # Buttons
-        tk.Button(self.reg_frame, text="Start Preview", command=self.toggle_preview).grid(row=4, column=0, pady=10)
-        tk.Button(self.reg_frame, text="Register", command=self.register_student).grid(row=4, column=1, pady=10)
+        button_frame = ttk.Frame(self.reg_frame)
+        button_frame.grid(row=6, column=0, columnspan=2, pady=10)
         
+        tk.Button(button_frame, text="Start Preview", command=self.toggle_preview).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Register", command=self.register_student).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Clear Form", command=self.clear_registration_form).pack(side=tk.LEFT, padx=5)
+
         # Attendance tab
         self.att_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.att_frame, text='Attendance')
@@ -173,13 +206,17 @@ class AttendanceSystem:
             messagebox.showerror("Error", "Please start preview first!")
             return
             
+        # Get all form values
         name = self.name_entry.get()
         roll_no = self.roll_no_entry.get()
+        batch = self.batch_entry.get()
+        course = self.course_entry.get()
         
-        if not name or not roll_no:
-            messagebox.showerror("Error", "Name and Roll No. are required!")
+        # Validate all fields
+        if not all([name, roll_no, batch, course]):
+            messagebox.showerror("Error", "All fields are required!")
             return
-            
+        
         face_locations = face_recognition.face_locations(self.current_frame)
         if len(face_locations) == 1:
             face_encoding = face_recognition.face_encodings(self.current_frame, face_locations)[0]
@@ -188,8 +225,10 @@ class AttendanceSystem:
             session = SessionLocal()
             try:
                 new_student = Student(
-                    roll_no=roll_no, 
-                    name=name, 
+                    roll_no=roll_no,
+                    name=name,
+                    batch=batch,
+                    course=course,
                     face_encoding=face_encoding.tobytes()
                 )
                 session.add(new_student)
@@ -204,6 +243,13 @@ class AttendanceSystem:
                 session.close()
         else:
             messagebox.showerror("Error", "Ensure one face is visible.")
+
+    def clear_registration_form(self):
+        """Clear all registration form fields"""
+        self.name_entry.delete(0, tk.END)
+        self.roll_no_entry.delete(0, tk.END)
+        self.batch_entry.set('')  # Clear batch
+        self.course_entry.set('')  # Clear course
 
     def take_attendance(self):
         self.cap = cv2.VideoCapture(0)
@@ -331,22 +377,27 @@ class AttendanceSystem:
         for item in self.tree.get_children():
             self.tree.delete(item)
         
-        # Create a new session
-        session = SessionLocal()
+        # Update tree columns to include new fields
+        self.tree['columns'] = ('Roll No', 'Name', 'Batch', 'Course', 'Registration Date')
         
+        # Configure all columns
+        for col in self.tree['columns']:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=100)
+        
+        session = SessionLocal()
         try:
-            # Load students from database
             students = session.query(Student).all()
             for student in students:
                 self.tree.insert('', 'end', values=(
-                    student.roll_no, 
-                    student.name, 
+                    student.roll_no,
+                    student.name,
+                    student.batch,
+                    student.course,
                     student.registration_date
                 ))
-        
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load student list: {str(e)}")
-        
         finally:
             session.close()
 
