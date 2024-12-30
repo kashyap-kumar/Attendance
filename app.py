@@ -163,17 +163,43 @@ class AttendanceSystem:
         self.list_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.list_frame, text='Student List')
         
+        # Add buttons frame above the tree
+        buttons_frame = ttk.Frame(self.list_frame)
+        buttons_frame.grid(row=0, column=0, sticky='ew', padx=5, pady=5)
+        
+        # Add Delete button
+        delete_btn = ttk.Button(buttons_frame, text="Delete Selected", command=self.delete_selected_student)
+        delete_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Add Refresh button
+        refresh_btn = ttk.Button(buttons_frame, text="Refresh List", command=self.load_student_list)
+        refresh_btn.pack(side=tk.LEFT, padx=5)
+        
         # Treeview for student list
-        self.tree = ttk.Treeview(self.list_frame, columns=('Roll No', 'Name', 'Registration Date'), show='headings')
-        self.tree.heading('Roll No', text='Roll No')
-        self.tree.heading('Name', text='Name')
-        self.tree.heading('Registration Date', text='Registration Date')
-        self.tree.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
+        self.tree = ttk.Treeview(self.list_frame, columns=('Roll No', 'Name', 'Batch', 'Course', 'Registration Date'), show='headings')
+        self.tree.grid(row=1, column=0, sticky='nsew', padx=5, pady=5)
+        
+        # Configure column headings and widths
+        column_widths = {
+            'Roll No': 100,
+            'Name': 150,
+            'Batch': 100,
+            'Course': 150,
+            'Registration Date': 150
+        }
+        
+        for col, width in column_widths.items():
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=width)
         
         # Scrollbar for treeview
         scrollbar = ttk.Scrollbar(self.list_frame, orient=tk.VERTICAL, command=self.tree.yview)
-        scrollbar.grid(row=0, column=1, sticky='ns')
+        scrollbar.grid(row=1, column=1, sticky='ns')
         self.tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Configure grid weights for proper resizing
+        self.list_frame.grid_columnconfigure(0, weight=1)
+        self.list_frame.grid_rowconfigure(1, weight=1)
         
         # Load student list
         self.load_student_list()
@@ -689,6 +715,49 @@ class AttendanceSystem:
         self.att_preview_label.config(image='', text="Photo Processing Complete")
         self.photo_paths.clear()
         self.update_upload_info()
+
+    def delete_selected_student(self):
+        """Delete the selected student from the database"""
+        # Get selected item
+        selected_item = self.tree.selection()
+        
+        if not selected_item:
+            messagebox.showwarning("Warning", "Please select a student to delete.")
+            return
+        
+        # Get student info from selected item
+        student_info = self.tree.item(selected_item[0])['values']
+        roll_no = student_info[0]  # Roll No is the first column
+        
+        # Confirm deletion
+        if not messagebox.askyesno("Confirm Delete", 
+                                f"Are you sure you want to delete student:\nRoll No: {roll_no}\nName: {student_info[1]}"):
+            return
+        
+        # Delete from database
+        session = SessionLocal()
+        try:
+            # First delete related attendance records
+            session.query(Attendance).filter_by(roll_no=roll_no).delete()
+            
+            # Then delete the student
+            student = session.query(Student).filter_by(roll_no=roll_no).first()
+            if student:
+                session.delete(student)
+                session.commit()
+                messagebox.showinfo("Success", "Student deleted successfully!")
+                
+                # Refresh the student list
+                self.load_student_list()
+            else:
+                messagebox.showerror("Error", "Student not found in database.")
+        
+        except Exception as e:
+            session.rollback()
+            messagebox.showerror("Error", f"Failed to delete student: {str(e)}")
+        
+        finally:
+            session.close()
 
     def run(self):
         self.root.mainloop()
