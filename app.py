@@ -422,46 +422,84 @@ class AttendanceSystem:
 
     def export_attendance_report(self):
         session = SessionLocal()
-        
         try:
-            # Get today's attendance with explicit join
-            today = datetime.now().date()
-            attendance_data = (
-                session.query(Attendance)
-                .join(Student, Attendance.roll_no == Student.roll_no)
-                .filter(func.date(Attendance.date) == today)
+            # Get subject selection from user
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Select Subject")
+            dialog.geometry("300x150")
+            dialog.grab_set()  # Make the dialog modal
+            
+            ttk.Label(dialog, text="Select Subject:").pack(pady=5)
+            subject_var = tk.StringVar()
+            
+            subjects = session.query(Subject).all()
+            if not subjects:
+                messagebox.showerror("Error", "No subjects available!")
+                dialog.destroy()
+                return
+            
+            subject_combo = ttk.Combobox(dialog, textvariable=subject_var, values=[f"{s.code} - {s.name}" for s in subjects])
+            subject_combo.pack(pady=5)
+            
+            def generate_report():
+                if not subject_var.get():
+                    messagebox.showerror("Error", "Please select a subject!")
+                    return
+                
+                selected_subject = subjects[[f"{s.code} - {s.name}" for s in subjects].index(subject_var.get())]
+                dialog.destroy()
+                self._generate_subject_report(selected_subject)
+            
+            ttk.Button(dialog, text="Generate Report", command=generate_report).pack(pady=10)
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to select subject: {str(e)}")
+        finally:
+            session.close()
+
+    def _generate_subject_report(self, subject):
+        session = SessionLocal()
+        try:
+            # Get all students and their attendance for the selected subject
+            students = (
+                session.query(
+                    Student.roll_no,
+                    Student.name,
+                    func.count(Attendance.id).label("present_count"),
+                )
+                .outerjoin(Attendance, (Student.roll_no == Attendance.roll_no) & (Attendance.subject_id == subject.id))
+                .group_by(Student.roll_no)
                 .all()
             )
             
-            if not attendance_data:
-                messagebox.showinfo("Info", "No attendance records found for today.")
-                return
+            total_sessions = (
+                session.query(func.count(Attendance.id))
+                .filter(Attendance.subject_id == subject.id)
+                .scalar()
+            ) or 0  # Default to 0 if no sessions
             
-            # Prepare data for DataFrame
+            # Prepare data
             report_data = [
                 {
-                    'Name': attendance.student.name, 
-                    'Roll No': attendance.roll_no, 
-                    'Date': attendance.date.date(), 
-                    'Time': attendance.time.time()
-                } 
-                for attendance in attendance_data
+                    "Roll No": student.roll_no,
+                    "Name": student.name,
+                    "Attendance Percentage": (student.present_count / total_sessions) * 100 if total_sessions > 0 else 0.0,
+                    # "Status": "Present" if student.present_count > 0 else "Absent"
+                }
+                for student in students
             ]
             
             df = pd.DataFrame(report_data)
             
             # Save to Excel
             filename = filedialog.asksaveasfilename(
-                defaultextension='.xlsx',
-                filetypes=[("Excel files", "*.xlsx")]
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
             )
             if filename:
                 df.to_excel(filename, index=False)
-                messagebox.showinfo("Success", "Attendance report exported successfully!")
-        
+                messagebox.showinfo("Success", f"Attendance report for {subject.name} exported successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to export report: {str(e)}")
-        
         finally:
             session.close()
 
