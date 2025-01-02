@@ -17,9 +17,10 @@ from tkcalendar import DateEntry
 import io
 
 # SQLAlchemy and MySQL dependencies
-from sqlalchemy import create_engine, Column, String, DateTime, LargeBinary, Float, ForeignKey
+from sqlalchemy import create_engine, Column, String, DateTime, LargeBinary, Float, ForeignKey, Enum
 from sqlalchemy.orm import declarative_base, sessionmaker, scoped_session, relationship
 from sqlalchemy.sql import func
+import enum
 
 # Database Configuration
 DB_USERNAME = 'root'  # Replace with your MySQL username
@@ -31,6 +32,11 @@ DB_NAME = 'attendance_system'
 Base = declarative_base()
 engine = create_engine(f'mysql+pymysql://{DB_USERNAME}:{DB_PASSWORD}@{DB_HOST}/{DB_NAME}', echo=False)
 SessionLocal = scoped_session(sessionmaker(bind=engine))
+
+# Add new Status enum
+class AttendanceStatus(enum.Enum):
+    PRESENT = "Present"
+    ABSENT = "Absent"
 
 # Database Models
 class Student(Base):
@@ -46,16 +52,32 @@ class Student(Base):
     # Relationship to Attendance
     attendances = relationship("Attendance", back_populates="student")
 
+class Subject(Base):
+    __tablename__ = 'subjects'
+    
+    id = Column(String(50), primary_key=True)
+    name = Column(String(100), nullable=False)
+    code = Column(String(20), nullable=False, unique=True)
+    course = Column(String(100), nullable=False)
+    batch = Column(String(50), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+    
+    # Relationship to Attendance
+    attendances = relationship("Attendance", back_populates="subject")
+
 class Attendance(Base):
     __tablename__ = 'attendance'
     
     id = Column(String(50), primary_key=True)
     roll_no = Column(String(50), ForeignKey('students.roll_no'), nullable=False)
+    subject_id = Column(String(50), ForeignKey('subjects.id'), nullable=False)
     date = Column(DateTime, nullable=False, server_default=func.now())
     time = Column(DateTime, nullable=False, server_default=func.now())
+    status = Column(Enum(AttendanceStatus), nullable=False, default=AttendanceStatus.PRESENT)
     
-    # Relationship to Student
+    # Relationships
     student = relationship("Student", back_populates="attendances")
+    subject = relationship("Subject", back_populates="attendances")
 
 # Create tables
 Base.metadata.create_all(engine)
@@ -74,9 +96,21 @@ class AttendanceSystem:
         # Store paths of uploaded photos
         self.photo_paths = []
 
+        # Add common_courses and batch_years as instance variables
+        current_year = datetime.now().year
+        self.common_courses = [
+            "B.Tech CSE", "B.Tech IT", "B.Tech ECE", "B.Tech EEE",
+            "B.Tech MECH", "B.Tech CIVIL", "M.Tech CSE", "MCA", "BCA"
+        ]
+        self.batch_years = [f"{year}-{year+4}" for year in range(current_year-4, current_year+1)]
+        
+        # Add current_subject attribute
+        self.current_subject = None
+        
         self.create_gui()
         self.create_analytics_tab()
         self.create_attendance_list_tab()
+        self.create_subject_tab()
         
     def create_gui(self):
         # Create notebook for tabs
@@ -278,12 +312,42 @@ class AttendanceSystem:
         self.course_entry.set('')  # Clear course
 
     def take_attendance(self):
-        self.cap = cv2.VideoCapture(0)
-        self.att_preview_label.config(text="Taking Attendance...")
+        """Take attendance with subject selection"""
+        # Create subject selection dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Subject")
+        dialog.geometry("300x150")
         
-        # Create a new thread for attendance
-        attendance_thread = Thread(target=self.process_attendance)
-        attendance_thread.start()
+        ttk.Label(dialog, text="Select Subject:").pack(pady=5)
+        subject_var = tk.StringVar()
+        
+        # Get subjects from database
+        session = SessionLocal()
+        subjects = session.query(Subject).all()
+        session.close()
+        
+        subject_combo = ttk.Combobox(dialog, 
+                                    textvariable=subject_var,
+                                    values=[f"{s.code} - {s.name}" for s in subjects])
+        subject_combo.pack(pady=5)
+        
+        def start_attendance():
+            if not subject_var.get():
+                messagebox.showerror("Error", "Please select a subject!")
+                return
+            
+            selected_subject = subjects[[f"{s.code} - {s.name}" for s in subjects].index(subject_var.get())]
+            dialog.destroy()
+            
+            self.current_subject = selected_subject
+            self.cap = cv2.VideoCapture(0)
+            self.att_preview_label.config(text=f"Taking Attendance for {selected_subject.name}")
+            
+            # Create attendance thread
+            attendance_thread = Thread(target=self.process_attendance)
+            attendance_thread.start()
+        
+        ttk.Button(dialog, text="Start Attendance", command=start_attendance).pack(pady=10)
 
     def process_attendance(self):
         marked_students = set()
@@ -342,10 +406,13 @@ class AttendanceSystem:
         self.att_preview_label.config(image='', text="Attendance Taken")
 
     def mark_attendance(self, session, roll_no):
+        """Mark attendance with subject reference"""
         try:
             attendance_record = Attendance(
-                id=f"{roll_no}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                roll_no=roll_no
+                id=f"{roll_no}_{self.current_subject.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                roll_no=roll_no,
+                subject_id=self.current_subject.id,
+                status=AttendanceStatus.PRESENT
             )
             session.add(attendance_record)
             session.commit()
@@ -503,85 +570,98 @@ class AttendanceSystem:
             messagebox.showinfo("Success", "Student attendance report exported successfully!")
     
     def create_attendance_list_tab(self):
-        """
-        Create a tab to display detailed attendance records
-        """
+        """Create a tab to display detailed attendance records"""
         # Attendance List Tab
         self.attendance_list_frame = ttk.Frame(self.notebook)
         self.notebook.add(self.attendance_list_frame, text='Attendance List')
         
+        # Add filter frame
+        filter_frame = ttk.Frame(self.attendance_list_frame)
+        filter_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Date range selection
+        ttk.Label(filter_frame, text="From:").pack(side=tk.LEFT, padx=(0,5))
+        self.from_date = DateEntry(filter_frame, width=12, background='darkblue', 
+                                foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        self.from_date.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Label(filter_frame, text="To:").pack(side=tk.LEFT, padx=(10,5))
+        self.to_date = DateEntry(filter_frame, width=12, background='darkblue', 
+                            foreground='white', borderwidth=2, date_pattern='y-mm-dd')
+        self.to_date.pack(side=tk.LEFT, padx=5)
+        
+        # Subject filter
+        ttk.Label(filter_frame, text="Subject:").pack(side=tk.LEFT, padx=(10,5))
+        self.subject_filter = ttk.Combobox(filter_frame, width=20)
+        self.subject_filter.pack(side=tk.LEFT, padx=5)
+        self.update_subject_filter()
+        
+        # Filter and Refresh buttons
+        ttk.Button(filter_frame, text="Filter", command=self.filter_attendance).pack(side=tk.LEFT, padx=10)
+        ttk.Button(filter_frame, text="Refresh", command=self.load_attendance_list).pack(side=tk.LEFT)
+        
         # Treeview for attendance records
-        columns = ('Roll No', 'Name', 'Date', 'Time')
+        columns = ('Roll No', 'Name', 'Subject', 'Date', 'Time', 'Status')
         self.attendance_tree = ttk.Treeview(self.attendance_list_frame, columns=columns, show='headings')
         
         # Configure column headings
         for col in columns:
             self.attendance_tree.heading(col, text=col)
-            self.attendance_tree.column(col, width=150, anchor='center')
+            self.attendance_tree.column(col, width=100)
         
-        # Pack the treeview
+        # Pack the treeview with scrollbar
         self.attendance_tree.pack(fill='both', expand=True)
         
-        # Scrollbar for treeview
-        scrollbar = ttk.Scrollbar(self.attendance_list_frame, orient=tk.VERTICAL, command=self.attendance_tree.yview)
+        scrollbar = ttk.Scrollbar(self.attendance_list_frame, orient=tk.VERTICAL, 
+                                command=self.attendance_tree.yview)
         scrollbar.pack(side='right', fill='y')
         self.attendance_tree.configure(yscrollcommand=scrollbar.set)
-        
-        # Date filter frame
-        filter_frame = ttk.Frame(self.attendance_list_frame)
-        filter_frame.pack(fill='x', padx=10, pady=5)
-        
-        # Date range selection
-        ttk.Label(filter_frame, text="From:").pack(side='left', padx=(0,5))
-        self.from_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        self.from_date.pack(side='left', padx=5)
-        
-        ttk.Label(filter_frame, text="To:").pack(side='left', padx=(10,5))
-        self.to_date = DateEntry(filter_frame, width=12, background='darkblue', foreground='white', borderwidth=2, date_pattern='y-mm-dd')
-        self.to_date.pack(side='left', padx=5)
-        
-        # Filter and Refresh buttons
-        ttk.Button(filter_frame, text="Filter", command=self.filter_attendance).pack(side='left', padx=10)
-        ttk.Button(filter_frame, text="Refresh", command=self.load_attendance_list).pack(side='left')
         
         # Initially load attendance list
         self.load_attendance_list()
 
-    def load_attendance_list(self, start_date=None, end_date=None):
-        """
-        Load attendance records into the treeview
-        
-        Args:
-            start_date (datetime, optional): Start date for filtering
-            end_date (datetime, optional): End date for filtering
-        """
+    def update_subject_filter(self):
+        """Update the subject filter combobox with current subjects"""
+        session = SessionLocal()
+        try:
+            subjects = session.query(Subject).all()
+            self.subject_filter['values'] = ['All'] + [f"{s.code} - {s.name}" for s in subjects]
+            self.subject_filter.set('All')
+        finally:
+            session.close()
+
+    def load_attendance_list(self, start_date=None, end_date=None, subject_filter=None):
+        """Load attendance records into the treeview"""
         # Clear existing items
         for item in self.attendance_tree.get_children():
             self.attendance_tree.delete(item)
         
-        # Create a new session
         session = SessionLocal()
-        
         try:
-            # Base query to get attendance with student details
+            # Base query with joins
             query = (
-                session.query(Attendance, Student)
+                session.query(Attendance, Student, Subject)
                 .join(Student, Attendance.roll_no == Student.roll_no)
+                .join(Subject, Attendance.subject_id == Subject.id)
             )
             
-            # Apply date filtering if dates are provided
+            # Apply filters
             if start_date and end_date:
-                query = query.filter(
-                    Attendance.date.between(start_date, end_date)
-                )
+                query = query.filter(Attendance.date.between(start_date, end_date))
+            
+            if subject_filter and subject_filter != 'All':
+                subject_code = subject_filter.split(' - ')[0]
+                query = query.filter(Subject.code == subject_code)
             
             # Execute query and populate treeview
-            for attendance, student in query.order_by(Attendance.date.desc()).all():
+            for attendance, student, subject in query.order_by(Attendance.date.desc()).all():
                 self.attendance_tree.insert('', 'end', values=(
-                    student.roll_no, 
-                    student.name, 
-                    attendance.date.strftime('%Y-%m-%d'), 
-                    attendance.time.strftime('%H:%M:%S')
+                    student.roll_no,
+                    student.name,
+                    f"{subject.code} - {subject.name}",
+                    attendance.date.strftime('%Y-%m-%d'),
+                    attendance.time.strftime('%H:%M:%S'),
+                    attendance.status.value
                 ))
         
         except Exception as e:
@@ -591,12 +671,11 @@ class AttendanceSystem:
             session.close()
 
     def filter_attendance(self):
-        """
-        Filter attendance records based on date range
-        """
+        """Filter attendance records based on date range and subject"""
         try:
             start_date = self.from_date.get_date()
             end_date = self.to_date.get_date()
+            subject_filter = self.subject_filter.get()
             
             # Ensure end date is not before start date
             if end_date < start_date:
@@ -604,7 +683,7 @@ class AttendanceSystem:
                 return
             
             # Load filtered attendance list
-            self.load_attendance_list(start_date, end_date)
+            self.load_attendance_list(start_date, end_date, subject_filter)
         
         except Exception as e:
             messagebox.showerror("Error", f"Error filtering attendance: {str(e)}")
@@ -643,17 +722,52 @@ class AttendanceSystem:
             self.upload_info_label.config(text=f"{len(self.photo_paths)} photos uploaded")
 
     def process_uploaded_photos(self):
-        """Process uploaded photos for attendance"""
+        """Process uploaded photos for attendance with subject selection"""
         if not self.photo_paths:
             messagebox.showinfo("Info", "Please upload photos first!")
             return
         
-        self.att_preview_label.config(text="Processing photos...")
-        self.root.update()
+        # Create subject selection dialog
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Select Subject")
+        dialog.geometry("300x150")
+        dialog.grab_set()  # Make dialog modal
         
-        # Create a new thread for processing
-        process_thread = Thread(target=self.process_photos_thread)
-        process_thread.start()
+        ttk.Label(dialog, text="Select Subject:").pack(pady=5)
+        subject_var = tk.StringVar()
+        
+        # Get subjects from database
+        session = SessionLocal()
+        subjects = session.query(Subject).all()
+        session.close()
+        
+        if not subjects:
+            messagebox.showerror("Error", "No subjects found. Please add subjects first!")
+            dialog.destroy()
+            return
+        
+        subject_combo = ttk.Combobox(dialog, 
+                                    textvariable=subject_var,
+                                    values=[f"{s.code} - {s.name}" for s in subjects])
+        subject_combo.pack(pady=5)
+        
+        def start_processing():
+            if not subject_var.get():
+                messagebox.showerror("Error", "Please select a subject!")
+                return
+            
+            selected_subject = subjects[[f"{s.code} - {s.name}" for s in subjects].index(subject_var.get())]
+            dialog.destroy()
+            
+            self.current_subject = selected_subject
+            self.att_preview_label.config(text=f"Processing photos for {selected_subject.name}...")
+            self.root.update()
+            
+            # Create a new thread for processing
+            process_thread = Thread(target=self.process_photos_thread)
+            process_thread.start()
+        
+        ttk.Button(dialog, text="Start Processing", command=start_processing).pack(pady=10)
 
     def process_photos_thread(self):
         """Thread function to process photos"""
@@ -664,6 +778,9 @@ class AttendanceSystem:
             # Get all student data
             known_students = session.query(Student).all()
             known_encodings = [np.frombuffer(student.face_encoding, dtype=np.float64) for student in known_students]
+            
+            # Dictionary to track attendance status for each student
+            attendance_status = {student.roll_no: False for student in known_students}
             
             for photo_path in self.photo_paths:
                 try:
@@ -686,6 +803,7 @@ class AttendanceSystem:
                             
                             if student.roll_no not in marked_students:
                                 marked_students.add(student.roll_no)
+                                attendance_status[student.roll_no] = True
                                 self.mark_attendance(session, student.roll_no)
                 
                 except Exception as e:
@@ -711,10 +829,23 @@ class AttendanceSystem:
 
     def show_photo_processing_complete(self, num_marked):
         """Show completion message after processing photos"""
-        messagebox.showinfo("Success", f"Photo processing completed!\nMarked attendance for {num_marked} students.")
-        self.att_preview_label.config(image='', text="Photo Processing Complete")
+        messagebox.showinfo(
+            "Success", 
+            f"Photo processing completed!\n"
+            f"Present: {num_marked} students\n"
+            f"Absent: {self.get_total_students() - num_marked} students"
+        )
+        self.att_preview_label.config(image='', text=f"Photo Processing Complete - {self.current_subject.name}")
         self.photo_paths.clear()
         self.update_upload_info()
+
+    def get_total_students(self):
+        """Get total number of students in the database"""
+        session = SessionLocal()
+        try:
+            return session.query(Student).count()
+        finally:
+            session.close()
 
     def delete_selected_student(self):
         """Delete the selected student from the database"""
@@ -756,6 +887,278 @@ class AttendanceSystem:
             session.rollback()
             messagebox.showerror("Error", f"Failed to delete student: {str(e)}")
         
+        finally:
+            session.close()
+
+    def create_subject_tab(self):
+        """Create the Subjects management tab"""
+        self.subject_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.subject_frame, text='Subjects')
+        
+        # Form frame
+        form_frame = ttk.LabelFrame(self.subject_frame, text="Add/Edit Subject")
+        form_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Subject form fields
+        ttk.Label(form_frame, text="Subject Name:").grid(row=0, column=0, padx=5, pady=5)
+        self.subject_name_entry = ttk.Entry(form_frame)
+        self.subject_name_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Subject Code:").grid(row=1, column=0, padx=5, pady=5)
+        self.subject_code_entry = ttk.Entry(form_frame)
+        self.subject_code_entry.grid(row=1, column=1, padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Course:").grid(row=2, column=0, padx=5, pady=5)
+        self.subject_course_entry = ttk.Combobox(form_frame, values=self.common_courses)
+        self.subject_course_entry.grid(row=2, column=1, padx=5, pady=5)
+        
+        ttk.Label(form_frame, text="Batch:").grid(row=3, column=0, padx=5, pady=5)
+        self.subject_batch_entry = ttk.Combobox(form_frame, values=self.batch_years)
+        self.subject_batch_entry.grid(row=3, column=1, padx=5, pady=5)
+        
+        # Buttons
+        button_frame = ttk.Frame(form_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(button_frame, text="Add Subject", command=self.add_subject).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Update Subject", command=self.update_subject).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Delete Subject", command=self.delete_subject).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Clear Form", command=self.clear_subject_form).pack(side=tk.LEFT, padx=5)
+        
+        # Subject list
+        list_frame = ttk.LabelFrame(self.subject_frame, text="Subject List")
+        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        # Add search/filter options
+        filter_frame = ttk.Frame(list_frame)
+        filter_frame.pack(fill='x', padx=5, pady=5)
+        
+        ttk.Label(filter_frame, text="Filter by Course:").pack(side=tk.LEFT, padx=5)
+        self.subject_filter_course = ttk.Combobox(filter_frame, values=['All'] + self.common_courses)
+        self.subject_filter_course.set('All')
+        self.subject_filter_course.pack(side=tk.LEFT, padx=5)
+        self.subject_filter_course.bind('<<ComboboxSelected>>', self.filter_subjects)
+        
+        ttk.Label(filter_frame, text="Filter by Batch:").pack(side=tk.LEFT, padx=5)
+        self.subject_filter_batch = ttk.Combobox(filter_frame, values=['All'] + self.batch_years)
+        self.subject_filter_batch.set('All')
+        self.subject_filter_batch.pack(side=tk.LEFT, padx=5)
+        self.subject_filter_batch.bind('<<ComboboxSelected>>', self.filter_subjects)
+        
+        # Treeview for subjects
+        self.subject_tree = ttk.Treeview(list_frame, 
+                                        columns=('ID', 'Name', 'Code', 'Course', 'Batch', 'Created At'),
+                                        show='headings')
+        
+        # Configure columns
+        for col in self.subject_tree['columns']:
+            self.subject_tree.heading(col, text=col)
+            self.subject_tree.column(col, width=100)
+        
+        self.subject_tree.pack(fill='both', expand=True)
+        self.subject_tree.bind('<<TreeviewSelect>>', self.on_subject_select)
+        
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.subject_tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.subject_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Load subjects
+        self.load_subject_list()
+
+    def filter_subjects(self, event=None):
+        """Filter subjects based on selected course and batch"""
+        course_filter = self.subject_filter_course.get()
+        batch_filter = self.subject_filter_batch.get()
+        
+        # Clear current list
+        for item in self.subject_tree.get_children():
+            self.subject_tree.delete(item)
+        
+        session = SessionLocal()
+        try:
+            # Start with base query
+            query = session.query(Subject)
+            
+            # Apply filters if not 'All'
+            if course_filter != 'All':
+                query = query.filter(Subject.course == course_filter)
+            if batch_filter != 'All':
+                query = query.filter(Subject.batch == batch_filter)
+            
+            # Get filtered subjects
+            subjects = query.all()
+            
+            # Populate treeview
+            for subject in subjects:
+                self.subject_tree.insert('', 'end', values=(
+                    subject.id,
+                    subject.name,
+                    subject.code,
+                    subject.course,
+                    subject.batch,
+                    subject.created_at
+                ))
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to filter subjects: {str(e)}")
+        finally:
+            session.close()
+
+    def add_subject(self):
+        """Add a new subject to the database"""
+        name = self.subject_name_entry.get()
+        code = self.subject_code_entry.get()
+        course = self.subject_course_entry.get()
+        batch = self.subject_batch_entry.get()
+        
+        if not all([name, code, course, batch]):
+            messagebox.showerror("Error", "All fields are required!")
+            return
+        
+        session = SessionLocal()
+        try:
+            new_subject = Subject(
+                id=f"SUB_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                name=name,
+                code=code,
+                course=course,
+                batch=batch
+            )
+            session.add(new_subject)
+            session.commit()
+            messagebox.showinfo("Success", "Subject added successfully!")
+            self.load_subject_list()
+            self.clear_subject_form()
+        except Exception as e:
+            session.rollback()
+            messagebox.showerror("Error", f"Failed to add subject: {str(e)}")
+        finally:
+            session.close()
+
+    def clear_subject_form(self):
+        """Clear the subject form fields"""
+        self.subject_name_entry.delete(0, tk.END)
+        self.subject_code_entry.delete(0, tk.END)
+        self.subject_course_entry.set('')
+        self.subject_batch_entry.set('')
+
+    def on_subject_select(self, event):
+        """Handle subject selection in treeview"""
+        selected_item = self.subject_tree.selection()
+        if selected_item:
+            values = self.subject_tree.item(selected_item[0])['values']
+            self.subject_name_entry.delete(0, tk.END)
+            self.subject_name_entry.insert(0, values[1])
+            self.subject_code_entry.delete(0, tk.END)
+            self.subject_code_entry.insert(0, values[2])
+            self.subject_course_entry.set(values[3])
+            self.subject_batch_entry.set(values[4])
+
+    def load_subject_list(self):
+        """Load subjects into the treeview"""
+        for item in self.subject_tree.get_children():
+            self.subject_tree.delete(item)
+        
+        session = SessionLocal()
+        try:
+            subjects = session.query(Subject).all()
+            for subject in subjects:
+                self.subject_tree.insert('', 'end', values=(
+                    subject.id,
+                    subject.name,
+                    subject.code,
+                    subject.course,
+                    subject.batch,
+                    subject.created_at
+                ))
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load subject list: {str(e)}")
+        finally:
+            session.close()
+
+    def update_subject(self):
+        """Update an existing subject in the database"""
+        selected_items = self.subject_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Warning", "Please select a subject to update!")
+            return
+        
+        # Get form values
+        name = self.subject_name_entry.get()
+        code = self.subject_code_entry.get()
+        course = self.subject_course_entry.get()
+        batch = self.subject_batch_entry.get()
+        
+        if not all([name, code, course, batch]):
+            messagebox.showerror("Error", "All fields are required!")
+            return
+        
+        # Get subject ID from selected item
+        subject_id = self.subject_tree.item(selected_items[0])['values'][0]
+        
+        session = SessionLocal()
+        try:
+            subject = session.query(Subject).filter_by(id=subject_id).first()
+            if subject:
+                # Update subject attributes
+                subject.name = name
+                subject.code = code
+                subject.course = course
+                subject.batch = batch
+                
+                session.commit()
+                messagebox.showinfo("Success", "Subject updated successfully!")
+                self.load_subject_list()
+                self.clear_subject_form()
+            else:
+                messagebox.showerror("Error", "Subject not found!")
+        except Exception as e:
+            session.rollback()
+            messagebox.showerror("Error", f"Failed to update subject: {str(e)}")
+        finally:
+            session.close()
+
+    def delete_subject(self):
+        """Delete the selected subject"""
+        selected_items = self.subject_tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Warning", "Please select a subject to delete!")
+            return
+        
+        # Get subject info
+        subject_values = self.subject_tree.item(selected_items[0])['values']
+        subject_id = subject_values[0]
+        subject_name = subject_values[1]
+        
+        # Confirm deletion
+        if not messagebox.askyesno("Confirm Delete", 
+                                f"Are you sure you want to delete subject:\n{subject_name}?"):
+            return
+        
+        session = SessionLocal()
+        try:
+            # First check if there are any attendance records for this subject
+            attendance_count = session.query(Attendance).filter_by(subject_id=subject_id).count()
+            if attendance_count > 0:
+                if not messagebox.askyesno("Warning", 
+                    f"This subject has {attendance_count} attendance records. Deleting it will also delete all related attendance records. Continue?"):
+                    return
+                
+                # Delete related attendance records
+                session.query(Attendance).filter_by(subject_id=subject_id).delete()
+            
+            # Delete the subject
+            session.query(Subject).filter_by(id=subject_id).delete()
+            session.commit()
+            
+            messagebox.showinfo("Success", "Subject deleted successfully!")
+            self.load_subject_list()
+            self.clear_subject_form()
+        
+        except Exception as e:
+            session.rollback()
+            messagebox.showerror("Error", f"Failed to delete subject: {str(e)}")
         finally:
             session.close()
 
