@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os
 import cv2
+import csv
 import face_recognition
 import numpy as np
 from datetime import datetime
@@ -79,6 +80,19 @@ class Attendance(Base):
     student = relationship("Student", back_populates="attendances")
     subject = relationship("Subject", back_populates="attendances")
 
+class Marks(Base):
+    __tablename__ = 'marks'
+    
+    id = Column(String(50), primary_key=True)
+    roll_no = Column(String(50), ForeignKey('students.roll_no'), nullable=False)
+    subject_code = Column(String(20), ForeignKey('subjects.code'), nullable=False)
+    marks = Column(Float, nullable=False)
+    test_code = Column(String(50), nullable=False)  # e.g., CT1, CT2
+    
+    # Relationships
+    student = relationship("Student")
+    subject = relationship("Subject")
+
 # Create tables
 Base.metadata.create_all(engine)
 
@@ -111,6 +125,7 @@ class AttendanceSystem:
         self.create_analytics_tab()
         self.create_attendance_list_tab()
         self.create_subject_tab()
+        self.create_marks_tab()
         
     def create_gui(self):
         # Create notebook for tabs
@@ -1199,6 +1214,222 @@ class AttendanceSystem:
             messagebox.showerror("Error", f"Failed to delete subject: {str(e)}")
         finally:
             session.close()
+
+    def create_marks_tab(self):
+        """Create the Marks management tab"""
+        self.marks_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.marks_frame, text='Marks')
+        
+        # Form frame
+        form_frame = ttk.LabelFrame(self.marks_frame, text="Add/Edit Marks")
+        form_frame.pack(fill='x', padx=10, pady=5)
+        
+        # Student selection
+        ttk.Label(form_frame, text="Student:").grid(row=0, column=0, padx=5, pady=5)
+        self.marks_student_var = tk.StringVar()
+        self.marks_student_combo = ttk.Combobox(form_frame, textvariable=self.marks_student_var)
+        self.marks_student_combo.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Subject selection
+        ttk.Label(form_frame, text="Subject:").grid(row=1, column=0, padx=5, pady=5)
+        self.marks_subject_var = tk.StringVar()
+        self.marks_subject_combo = ttk.Combobox(form_frame, textvariable=self.marks_subject_var)
+        self.marks_subject_combo.grid(row=1, column=1, padx=5, pady=5)
+        
+        # Test Code
+        ttk.Label(form_frame, text="Test Code:").grid(row=2, column=0, padx=5, pady=5)
+        self.test_code_var = tk.StringVar()
+        test_codes = ['CT1', 'CT2', 'CT3', 'MID', 'END']
+        self.test_code_combo = ttk.Combobox(form_frame, textvariable=self.test_code_var, values=test_codes)
+        self.test_code_combo.grid(row=2, column=1, padx=5, pady=5)
+        
+        # Marks
+        ttk.Label(form_frame, text="Marks:").grid(row=3, column=0, padx=5, pady=5)
+        self.marks_entry = ttk.Entry(form_frame)
+        self.marks_entry.grid(row=3, column=1, padx=5, pady=5)
+        
+        # Buttons frame
+        button_frame = ttk.Frame(form_frame)
+        button_frame.grid(row=4, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(button_frame, text="Submit Marks", command=self.upload_marks).pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="Clear Form", command=self.clear_marks_form).pack(side=tk.LEFT, padx=5)
+        
+        # Marks list frame
+        list_frame = ttk.LabelFrame(self.marks_frame, text="Marks List")
+        list_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        # Filter frame
+        filter_frame = ttk.Frame(list_frame)
+        filter_frame.pack(fill='x', padx=5, pady=5)
+        
+        # Subject filter
+        ttk.Label(filter_frame, text="Filter by Subject:").pack(side=tk.LEFT, padx=5)
+        self.marks_filter_subject = ttk.Combobox(filter_frame)
+        self.marks_filter_subject.pack(side=tk.LEFT, padx=5)
+        
+        # Test code filter
+        ttk.Label(filter_frame, text="Filter by Test:").pack(side=tk.LEFT, padx=5)
+        self.marks_filter_test = ttk.Combobox(filter_frame, values=['All'] + test_codes)
+        self.marks_filter_test.pack(side=tk.LEFT, padx=5)
+        self.marks_filter_test.set('All')
+        
+        # Filter button
+        ttk.Button(filter_frame, text="Apply Filter", command=self.load_marks_list).pack(side=tk.LEFT, padx=5)
+        
+        # Marks treeview
+        self.marks_tree = ttk.Treeview(list_frame, 
+                                    columns=('Roll No', 'Name', 'Subject', 'Test Code', 'Marks'),
+                                    show='headings')
+        
+        # Configure columns
+        for col in self.marks_tree['columns']:
+            self.marks_tree.heading(col, text=col)
+            self.marks_tree.column(col, width=100)
+        
+        self.marks_tree.pack(fill='both', expand=True)
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.marks_tree.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.marks_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Initialize comboboxes
+        self.update_marks_comboboxes()
+        
+        # Load initial marks list
+        self.load_marks_list()
+
+    def upload_marks(self):
+        """Upload marks for a student"""
+        # Get form values
+        student = self.marks_student_var.get()
+        subject = self.marks_subject_var.get()
+        test_code = self.test_code_var.get()
+        marks = self.marks_entry.get()
+        
+        # Validate inputs
+        if not all([student, subject, test_code, marks]):
+            messagebox.showerror("Error", "All fields are required!")
+            return
+        
+        try:
+            marks_value = float(marks)
+            if marks_value < 0 or marks_value > 100:
+                messagebox.showerror("Error", "Marks must be between 0 and 100!")
+                return
+        except ValueError:
+            messagebox.showerror("Error", "Marks must be a valid number!")
+            return
+        
+        # Extract roll number and subject code
+        roll_no = student.split(' - ')[0]
+        subject_code = subject.split(' - ')[0]
+        
+        session = SessionLocal()
+        try:
+            # Check if marks already exist for this combination
+            existing_marks = session.query(Marks).filter_by(
+                roll_no=roll_no,
+                subject_code=subject_code,
+                test_code=test_code
+            ).first()
+            
+            if existing_marks:
+                # Update existing marks
+                existing_marks.marks = marks_value
+                action = "updated"
+            else:
+                # Create new marks entry
+                new_marks = Marks(
+                    id=f"MRK_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    roll_no=roll_no,
+                    subject_code=subject_code,
+                    test_code=test_code,
+                    marks=marks_value
+                )
+                session.add(new_marks)
+                action = "added"
+            
+            session.commit()
+            messagebox.showinfo("Success", f"Marks {action} successfully!")
+            self.clear_marks_form()
+            self.load_marks_list()
+        
+        except Exception as e:
+            session.rollback()
+            messagebox.showerror("Error", f"Failed to submit marks: {str(e)}")
+        finally:
+            session.close()
+
+    def load_marks_list(self):
+        """Load marks into the treeview with filtering"""
+        # Clear existing items
+        for item in self.marks_tree.get_children():
+            self.marks_tree.delete(item)
+        
+        # Get filter values
+        subject_filter = self.marks_filter_subject.get()
+        test_filter = self.marks_filter_test.get()
+        
+        session = SessionLocal()
+        try:
+            # Base query with joins
+            query = (
+                session.query(Marks, Student, Subject)
+                .join(Student, Marks.roll_no == Student.roll_no)
+                .join(Subject, Marks.subject_code == Subject.code)
+            )
+            
+            # Apply filters
+            if subject_filter and subject_filter != 'All':
+                subject_code = subject_filter.split(' - ')[0]
+                query = query.filter(Marks.subject_code == subject_code)
+            
+            if test_filter and test_filter != 'All':
+                query = query.filter(Marks.test_code == test_filter)
+            
+            # Execute query and populate treeview
+            for marks, student, subject in query.all():
+                self.marks_tree.insert('', 'end', values=(
+                    student.roll_no,
+                    student.name,
+                    f"{subject.code} - {subject.name}",
+                    marks.test_code,
+                    f"{marks.marks:.2f}"
+                ))
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load marks list: {str(e)}")
+        finally:
+            session.close()
+
+    def update_marks_comboboxes(self):
+        """Update the comboboxes in the marks tab with current data"""
+        session = SessionLocal()
+        try:
+            # Update student combobox
+            students = session.query(Student).all()
+            self.marks_student_combo['values'] = [f"{s.roll_no} - {s.name}" for s in students]
+            
+            # Update subject combobox
+            subjects = session.query(Subject).all()
+            subject_values = [f"{s.code} - {s.name}" for s in subjects]
+            self.marks_subject_combo['values'] = subject_values
+            self.marks_filter_subject['values'] = ['All'] + subject_values
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to update comboboxes: {str(e)}")
+        finally:
+            session.close()
+
+    def clear_marks_form(self):
+        """Clear all fields in the marks form"""
+        self.marks_student_var.set('')
+        self.marks_subject_var.set('')
+        self.test_code_var.set('')
+        self.marks_entry.delete(0, tk.END)
+        
 
     def run(self):
         self.root.mainloop()
